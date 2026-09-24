@@ -22,6 +22,34 @@ make test
 Docker'а на ноутбуке нет? Тогда локально работают тесты и линтер
 (`composer install && make test`), а форму для упражнения 1.6.3 ведущий даст на стенде — скажите ему.
 
+## Как проверить, что сервис жив
+
+После `make up` сервис слушает порт из `APP_PORT` (по умолчанию `8080`),
+база — порт `DB_PORT` (по умолчанию `3307`). Самый быстрый smoke-test — три команды:
+
+```bash
+make ps                    # какие контейнеры поднялись и их статус
+curl -fsS http://localhost:8080/health   # GET /health → 200 OK, {"status":"ok"}
+curl -fsS -X POST http://localhost:8080/api/ltv \
+  -H 'Content-Type: application/json' \
+  -d '{"vin":"XTA21099998765432","year":2019,"mileage":84000,
+       "market_value":900000,"requested_amount":450000,"term_months":24}'
+```
+
+Что ещё полезно, если что-то пошло не так:
+
+| Команда | Когда поможет |
+|---|---|
+| `make ps` | увидеть состояние контейнеров `backend` и `db` (Up / Exit / Restarting) |
+| `make logs` | поток логов backend — смотреть, на чём упал старт (`bind`, миграции, PHP fatal) |
+| `docker compose logs db` | если `/health` отвечает 500 — проверить, поднялась ли MySQL и прошёл ли healthcheck |
+| `docker compose ps` | полный статус с healthcheck'ами (`healthy` / `starting` / `unhealthy`) |
+| `curl -v http://localhost:8080/health` | подробный вывод: TCP-соединение, заголовки, код ответа |
+| `make down && make up` | перезапустить стек, если контейнеры зависли (данные в томе сохранятся) |
+
+> `/health` всегда должен отвечать `200 OK` за пару миллисекунд — это liveness-проверка
+> без обращения к базе. Если она отвечает 5xx, проблема в PHP-окружении, а не в данных.
+
 | Команда | Что делает |
 |---|---|
 | `make up` | поднять сервис и базу |
