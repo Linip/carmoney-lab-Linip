@@ -47,55 +47,41 @@ flowchart TD
     - иначе → `reject`.
       Текущие пороги из `rules.php`: `approve_max = 60.0`, `review_max = 85.0`.
 5. `VehicleAge::inYears($input['year'])` (строка 36) — только чтобы положить `vehicle_age` в ответ, на решение не влияет.
-6. `approved_limit` (строка 39): равен `requested_amount` при `approve`, иначе `0`. Справочник `rules.ltv_by_age` пока не используется (это задача LOAN-12, см. комментарий в шапке `AssessmentService` и в `rules.php`).
+6. **Правило по пробегу** (после `decide()`, до формирования `approved_limit`): если решение — `approve` и `$input['mileage'] > rules.vehicle.max_mileage_review_km` (400 000), решение понижается до `review`. Граница включительная: `mileage <= 400000` — ещё `approve`. Решения `review`/`reject` по LTV правило не трогает. Задача MILEAGE.
+7. `approved_limit` (строка 39): равен `requested_amount` при `approve`, иначе `0`. Справочник `rules.ltv_by_age` пока не используется (это задача LOAN-12, см. комментарий в шапке `AssessmentService` и в `rules.php`).
 
 ---
 
-## Если добавить правило «пробег ≤ 400 000 км, иначе review»
+## Правило «пробег ≤ 400 000 км, иначе review» (задача MILEAGE, реализовано)
 
-### Где встанет
+### Где стоит
 
-- В `AssessmentService::assess`, **между** `LtvCalculator::calculate(...)` и `DecisionEngine::decide(...)` (строки 32–33). Это единственное место, где решение «подавляется» до финального `decide(...)` по LTV. Альтернативно можно править `DecisionEngine::decide`, но он сейчас чисто пороговый и не принимает других параметров — расширять его не нужно.
-- Порог `400 000` кладётся в `backend/config/rules.php`, в блок `vehicle` рядом с уже существующим `max_mileage_km` (например, `'max_mileage_review_km' => 400000`). Сейчас `max_mileage_km = 500000` — это **жёсткий потолок** в валидаторе, новое правило с ним не конфликтует.
-- Никаких новых зависимостей у `AssessmentService` не потребуется: значение пробега уже есть в `$input['mileage']` после шага валидации.
+- В `AssessmentService::assess`, **после** `DecisionEngine::decide(...)` (строки 33–34) и **до** формирования массива ответа (строка 35 и далее). Правило подавляет `approve` до финального шага, чтобы `approved_limit` (строка 39) автоматически обнулился через условие `approve ? requested_amount : 0`.
+- `DecisionEngine::decide` оставлен чисто пороговым по LTV и в задачу MILEAGE не расширяется.
+- Порог `400 000` лежит в `backend/config/rules.php`, блок `vehicle`, ключ `max_mileage_review_km` рядом с уже существующим `max_mileage_km = 500000`. Связка `max_mileage_review_km <= max_mileage_km` закреплена тестом `testReviewThresholdDoesNotExceedHardCeiling`.
+- В `AssessmentService` прокинут массив `$rules` (5-й параметр конструктора), чтобы домен не лазил в config сам.
 
-### Входные данные: что есть, чего не хватает
+### Шкала решений по пробегу (синхронно со спекой `spec_MILEAGE.md`)
 
-Есть в коде сейчас:
-- `$input['mileage']` — нормализованный целочисленный пробег, уже приведённый к `int` в `ApplicationValidator::validate` (строки 43 и 78).
-- Нужный порог — добавить в `rules.php`.
+| Пробег, км | Что происходит | Где |
+|---|---|---|
+| `0..400000` | решение по LTV, без влияния пробега | (правило не срабатывает) |
+| `400001..500000` | `approve` по LTV понижается до `review`; `review`/`reject` по LTV не меняются; `approved_limit = 0` | `AssessmentService::assess` |
+| `> 500000` | `ValidationException` по полю `mileage` (HTTP 422), до расчёта решения не доходит | `ApplicationValidator::validate` |
 
-Не хватает:
-- Ничего. Источник пробега (поле `mileage` в payload) уже валидируется, нормализуется и проходит до `assess()`; больше ничего для этого правила не требуется.
+Жёсткий потолок `max_mileage_km` (500 000) в валидаторе не сдвинут и не заменён новым правилом — это разные механизмы: мягкое понижение в `AssessmentService` и жёсткий отказ в `ApplicationValidator`.
 
-### Как встроить (набросок, без правки)
+### Покрытие
 
-```php
-$ltv = $this->ltvCalculator->calculate(...);
-$decision = $this->decisionEngine->decide($ltv);
-
-// новое правило
-if ($decision === DecisionEngine::APPROVE
-    && $input['mileage'] > $this->rules['vehicle']['max_mileage_review_km']) {
-    $decision = DecisionEngine::REVIEW;
-}
-```
-
-(В текущей сигнатуре `AssessmentService` массив `$rules` не прокинут — добавить в конструктор как `private readonly array $rules`, чтобы не лазить в config из домена.)
+Тесты: `tests/Unit/AssessmentServiceTest.php` (11 методов) и `tests/Unit/ApplicationValidatorTest.php` (4 метода) — по одному методу на каждый критерий приёмки AC-MILEAGE-01…16, кроме AC-MILEAGE-11 (по решению заказчика поведение `'' → 0 км` не закрепляется юнит-тестом, проверяется smoke).
 
 ---
 
-## Что в коде уже сейчас проверяется про пробег
+## Что в коде проверяется про пробег сейчас
 
-Только одно — в `ApplicationValidator::validate`, строки 43–46:
+Два места:
 
-```php
-$mileage = (int) ($payload['mileage'] ?? -1);
-if ($mileage < 0 || $mileage > $this->rules['vehicle']['max_mileage_km']) {
-    $errors['mileage'] = sprintf('Пробег от 0 до %d км', $this->rules['vehicle']['max_mileage_km']);
-}
-```
-
-Это жёсткий диапазон `[0, 500000]`. При выходе — `ValidationException` (заявка отклоняется целиком, до `LtvCalculator`/`DecisionEngine` дело не доходит). На итоговое `approve/review/reject` пробег сейчас **никак не влияет** — ни в `AssessmentService`, ни в `DecisionEngine`, ни в `LtvCalculator` он не читается.
+1. **`ApplicationValidator::validate`, строки 43–46** — жёсткий диапазон `0..max_mileage_km` (500 000). При выходе — `ValidationException` (заявка отклоняется целиком, до `LtvCalculator`/`DecisionEngine` дело не доходит).
+2. **`AssessmentService::assess`, строки 34–36** — мягкое правило задачи MILEAGE: `approve` при `mileage > max_mileage_review_km` (400 000) понижается до `review`.
 
 Поля `mileage` в БД/репозитории/справочнике `ltv_by_age` — нет.

@@ -20,7 +20,11 @@ return [
     'vehicle' => [
         'min_year' => 1990,
         'max_age_years' => 20,
+        // Жёсткий потолок пробега в валидаторе (заявка целиком отклоняется).
         'max_mileage_km' => 500000,
+        // Порог мягкого понижения approve -> review в AssessmentService
+        // (граница включительная: пробег <= 400000 ещё approve).
+        'max_mileage_review_km' => 400000,
     ],
 
     'amount' => [

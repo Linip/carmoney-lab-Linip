@@ -36,6 +36,7 @@ final class AppFactory
             new LtvCalculator(),
             new DecisionEngine($rules['ltv']),
             new VehicleAge((int) date('Y')),
+            $rules,
         );
 
         $controller = new ApplicationController($assessment, new ApplicationRepository($pdo));
